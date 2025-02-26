@@ -1,0 +1,211 @@
+---
+title: "Kaggle"
+author: "Blake Hammarstrom & Ty Hammond"
+output: pdf_document
+date: "2025-02-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Libraries
+library(caret)
+library(glmnet)
+library(xgboost)
+#reproducibility
+set.seed(478)
+```
+
+```{r}
+#Data Preprocessing
+
+train_data <- read.csv("train.csv", stringsAsFactors = TRUE)
+test_data  <- read.csv("test.csv", stringsAsFactors = TRUE)
+
+# so we don't lose SalePrice
+id_sale_train <- train_data[, c("Id", "SalePrice")]
+
+cat("Train dimensions:", dim(train_data), "\n")
+#str(train_data)
+#summary(train_data)
+
+# Checked for missing values in train
+na_counts <- sapply(train_data, function(x) sum(is.na(x)))
+print(na_counts[na_counts > 0])
+
+# Separated predictors and target
+predictors_train <- train_data[, setdiff(names(train_data), "SalePrice")]
+target_train     <- train_data$SalePrice
+
+#Made sure SalePrice was not included in test data 
+predictors_test <- test_data[, setdiff(names(test_data), "SalePrice")]
+
+# Converted categorical variables into dummy vars
+dummy_model <- dummyVars(" ~ .", data = predictors_train)
+train_dummy <- as.data.frame.matrix(predict(dummy_model, newdata = predictors_train))
+test_dummy  <- as.data.frame.matrix(predict(dummy_model, newdata = predictors_test))
+
+# Aligned columns
+missing_cols <- setdiff(names(train_dummy), names(test_dummy))
+if(length(missing_cols) > 0) {
+  for(col in missing_cols) {
+    test_dummy[[col]] <- 0
+  }
+}
+# Reordered test columns to match training
+test_dummy <- test_dummy[, names(train_dummy)]
+
+# Imputed missing values using median 
+preProc <- preProcess(train_dummy, method = "medianImpute")
+train_imputed <- predict(preProc, train_dummy)
+test_imputed  <- predict(preProc, test_dummy)
+
+# Combined imputed training predictors with Sale Price
+train_final <- cbind(train_imputed, SalePrice = target_train)
+
+#Cleaned column names, ran into errors with MSZoningC (all)
+names(train_final) <- make.names(names(train_final))
+names(test_imputed) <- make.names(names(test_imputed))
+
+cat("Processed training data dimensions:", dim(train_final), "\n")
+```
+
+Training Validation Split
+```{r}
+trainIndex <- createDataPartition(train_final$SalePrice, p = 0.8, 
+                                  list = FALSE)
+train_set <- train_final[trainIndex, ]
+val_set   <- train_final[-trainIndex, ]
+cat("Training Set Dimensions:", dim(train_set), "\n")
+cat("Validation Set Dimensions:", dim(val_set), "\n")
+```
+
+Random Forest
+
+```{r}
+# Train model
+rf_model <- randomForest(SalePrice ~ ., data = train_final, ntree = 100)
+print(rf_model)
+
+# Validation Predictions (For RMSE & Log RMSE)
+rf_predictions_val <- predict(rf_model, newdata = val_set)
+
+# Predictions on Test Set (For Actually Submitting to Kaggle)
+rf_predictions_test <- predict(rf_model, newdata = test_imputed)
+final_predictions <- data.frame(Id = test_imputed$Id, SalePrice = rf_predictions_test)
+
+# Check
+head(final_predictions)
+
+# Log RMSE
+rf_log_rmse <- sqrt(mean((log(rf_predictions_val) - log(val_set$SalePrice))^2))
+cat("Random Forest Log RMSE on validation set:", rf_log_rmse, "\n")
+
+# RMSE
+rf_rmse <- sqrt(mean((rf_predictions_val - val_set$SalePrice)^2))
+cat("Random Forest RMSE on validation set:", rf_rmse, "\n")
+
+# Importance Plot
+
+varImpPlot(rf_model, n.var = 10, main = "Top 10 Important Features", cex = 0.8)
+```
+
+LASSO
+
+```{r}
+# 5 CV & grid
+control <- trainControl(method = "cv", number = 5)
+lasso_grid <- expand.grid(alpha = 1, 
+                          lambda = seq(0.0001, 1, length = 100))
+
+# Train model
+lasso_model <- train(SalePrice ~ ., data = train_final, method = "glmnet",
+                     trControl = control, tuneGrid = lasso_grid)
+print(lasso_model)
+
+# Validation Predictions (For RMSE & Log RMSE)
+lasso_predictions_val <- predict(lasso_model, newdata = val_set)
+
+# Predictions on Test Set (For Actually Submitting to Kaggle)
+lasso_predictions_test <- predict(lasso_model, newdata = test_imputed)
+final_predictions_lasso <- data.frame(Id = test_data$Id, SalePrice = lasso_predictions_test)
+
+# Check
+head(final_predictions_lasso)
+
+# Log RMSE
+lasso_log_rmse <- sqrt(mean((log(lasso_predictions_val) - log(val_set$SalePrice))^2))
+cat("LASSO Log RMSE on validation set:", lasso_log_rmse, "\n")
+
+# RMSE
+lasso_rmse <- sqrt(mean((lasso_predictions_val - val_set$SalePrice)^2))
+cat("Random Forest RMSE on validation set:", lasso_rmse, "\n")
+```
+
+Ridge
+
+```{r}
+# Grid
+ridge_grid <- expand.grid(alpha = 0, 
+                          lambda = seq(0.0001, 1, length = 100))
+
+# Train model
+ridge_model <- train(SalePrice ~ ., data = train_final, method = "glmnet",
+                     trControl = control, tuneGrid = ridge_grid)
+print(ridge_model)
+
+# Validation Predictions (For RMSE & Log RMSE)
+ridge_predictions_val <- predict(ridge_model, newdata = val_set)
+
+# Predictions on Test Set (For Actually Submitting to Kaggle)
+ridge_predictions_test <- predict(ridge_model, newdata = test_imputed)
+final_predictions_ridge <- data.frame(Id = test_data$Id, SalePrice = ridge_predictions_test)
+
+# Check
+head(final_predictions_ridge)
+
+# Log RMSE
+ridge_log_rmse <- sqrt(mean((log(ridge_predictions_val) - log(val_set$SalePrice))^2))
+cat("Ridge Log RMSE on validation set:", ridge_log_rmse, "\n")
+
+# RMSE
+ridge_rmse <- sqrt(mean((ridge_predictions_val - val_set$SalePrice)^2))
+cat("Ridge RMSE on validation set:", ridge_rmse, "\n")
+```
+
+XGBoost
+
+```{r}
+# CV & grid
+xgb_control <- trainControl(method = "cv", number = 5)
+xgb_grid <- expand.grid(nrounds = c(100, 200), max_depth = c(3, 6, 9),
+                        eta = c(0.01, 0.1, 0.3), gamma = 0,
+                        colsample_bytree = 0.8, min_child_weight = 1,
+                        subsample = 0.8)
+
+# Train model
+xgb_model <- train(SalePrice ~ ., data = train_final, method = "xgbTree",
+                   trControl = xgb_control, tuneGrid = xgb_grid, 
+                   verbose = FALSE)
+print(xgb_model)
+
+# Validation Predictions (For RMSE & Log RMSE)
+xgb_predictions_val <- predict(xgb_model, newdata = val_set)
+
+# Predictions on Test Set (For Actually Submitting to Kaggle)
+xgb_predictions_test <- predict(xgb_model, newdata = test_imputed)
+final_predictions_xgb <- data.frame(Id = test_data$Id, SalePrice = xgb_predictions_test)
+
+# Check
+head(final_predictions_xgb)
+
+# Log RMSE
+xgb_log_rmse <- sqrt(mean((log(xgb_predictions_val) - log(val_set$SalePrice))^2))
+cat("XGBoost Log RMSE on validation set:", xgb_log_rmse, "\n")
+
+# RMSE
+xgb_rmse <- sqrt(mean((xgb_predictions_val - val_set$SalePrice)^2))
+cat("XGBoost RMSE on validation set:", xgb_rmse, "\n")
+```
